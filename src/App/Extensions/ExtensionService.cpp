@@ -15,7 +15,6 @@
 #include "App/Extensions/ResourcePatch/Extension.hpp"
 #include "App/Extensions/Transmog/Extension.hpp"
 #include "App/Extensions/WorldStreaming/Extension.hpp"
-#include "Red/ExtensionService.hpp"
 #include "Red/GameApplication.hpp"
 #include "Red/GameEngine.hpp"
 #include "Red/ResourceLoader.hpp"
@@ -59,10 +58,6 @@ void App::ExtensionService::OnBootstrap()
     HookAfter<Raw::LoadTweakDB>([&]() {
         m_loader->OnTweakDBReady();
     }).OrThrow();
-
-    Hook<Raw::ExtensionService::Bootstrap>(+[](void*) {}).OrThrow();
-    Hook<Raw::ExtensionService::Shutdown>(+[](void*) {}).OrThrow();
-    Hook<Raw::ExtensionLoader::Configure>(+[](void*) {}).OrThrow();
 
     Raw::InkSpawner::ControllerInjectionEnabled::Ref() = false;
 }
