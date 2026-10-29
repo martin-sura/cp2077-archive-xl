@@ -89,6 +89,8 @@ private:
     static void OnFindAppearance(Red::Handle<Red::mesh::MeshAppearance>& aAppearance, Red::CMesh* aMesh, Red::CName aName);
     static void* OnLoadMaterials(Red::CMesh* aTargetMesh, Red::MeshMaterialsToken& aToken,
                                  const Red::DynArray<Red::CName>& aMaterialNames, uint8_t a4);
+    static void* LoadMaterialsWithMissingEntries(Red::CMesh* aTargetMesh, Red::MeshMaterialsToken& aToken,
+                                                 const Red::DynArray<Red::CName>& aMaterialNames, uint8_t a4);
     static void OnAddStubAppearance(Red::CMesh* aMesh);
     static bool OnPreloadAppearances(Red::CMesh* aMesh);
 
@@ -128,5 +130,12 @@ private:
     inline static Red::Handle<Red::CMaterialInstance> s_tempMaterial;
     inline static Red::SharedSpinLock s_stateLock;
     inline static Core::SharedPtr<ResourcePathRegistry> s_resourcePathRegistry;
+
+    // Diagnostic tracing (see DEBUGGING_NOTES.md, Test E). Enabled via AXL_MESH_TRACE=<path substring>.
+    static bool IsTraced(Red::CMesh* aMesh);
+    inline static std::string s_traceFilter;
+    inline static bool s_fixMissingMaterials{true};
+    inline static Core::Set<Red::ResourcePath> s_missingReported;
+    inline static std::mutex s_missingReportLock;
 };
 }

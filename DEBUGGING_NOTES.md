@@ -1,6 +1,15 @@
 # ArchiveXL Regression & Root Cause Analysis on Cyberpunk 2077 Patch 2.5
 
-## 1. Executive Summary & Definitive Root Cause
+## 0. Update (2026-10-29): Confirmed Root Cause & Fix
+
+> [!IMPORTANT]
+> Tests E–F (section 2, section 6.3) supersede the conclusion below and the recommendation in 6.1.
+>
+> **Root cause:** the affected mod meshes reference a chunk material (`material_01_multilayer`) that has no entry in the mesh's `materialEntries`. Since patch 2.5, `CMesh::LoadMaterialsAsync` then returns `engine\materials\fallback.remt` for **every** material in the request, so the whole mesh renders invisible. The built-in DynamicMesh extension (bridge `vfunc[+0x70]`) compensates for this, which is why nulling only its slot (Test C2) or suppressing the built-in service (Test B, upstream `1417f40`) exposes the bug. The meshes are **not** ArchiveXL-dynamic (no `@` markers), so ArchiveXL's own `MeshExtension` ignored them.
+>
+> **Fix (Test F, verified in-game):** `App::MeshExtension::LoadMaterialsWithMissingEntries` substitutes missing names with a valid one before the engine call and puts an empty material into those slots afterwards. This works with the built-in service suppressed, keeping upstream's design. Re-enabling the built-in service (6.1) is no longer needed.
+
+## 1. Executive Summary & Original Root Cause Hypothesis
 
 Following the release of **Cyberpunk 2077 Patch 2.5** and **ArchiveXL 1.28.3**, several dynamic appearance items—specifically Dynamic Mesh clothing items such as `nd_aquelyras_goth_belt` and `nd_aquelyras_punk_shoes`—failed to render in-game (appearing completely invisible), while static and standard dynamic appearance items (such as `axellysse_stars_belt`) continued to render normally.
 
@@ -27,7 +36,13 @@ Every potential point of failure was tested in-game with exact runtime logs:
 | **Test B** | TruthLogger with `AXL_SUPPRESS_BUILTIN_EXTENSIONS=1` (`1417f40`) | ❌ Intercepted (no-op) | ❌ Inactive (`nullptr`) | ❌ Inactive (`nullptr`) | **Invisible** | Confirmed: Suppressing built-in extension service reliably reproduces the bug. |
 | **Test C1** | Selective Slot Bisection: Mode `GARMENT` | ✅ Active | ❌ **Nulled out** (`0`) | ✅ Active | **Visible** | **GarmentExtension is completely innocent.** Garments render properly even when embedded GarmentExtension is eliminated. |
 | **Test C2** | Selective Slot Bisection: Mode `MESH` | ✅ Active | ✅ Active | ❌ **Nulled out** (`0`) | **Invisible** | **MeshExtension is 100% the sole root cause.** Nulling only the Mesh slot reproduces the exact invisibility. |
-| **Test D (Sol. 1)**| Bridge VTable Hook with `AXL_SUPPRESS_BUILTIN_EXTENSIONS=1` | ❌ Intercepted (no-op) | ❌ Inactive (`nullptr`) | ❌ Inactive (`nullptr`) | **Invisible** | **Bridge VTable hook never called.** `Bootstrap` at RVA `0x2224D70` initializes the global Bridge instance at RVA `0x4334610`; suppressing `Bootstrap` leaves the Bridge uninitialized across 70+ engine subsystems. |
+| ~~**Test D (Sol. 1)**~~ | ~~Bridge VTable Hook with `AXL_SUPPRESS_BUILTIN_EXTENSIONS=1`~~ | ❌ Intercepted (no-op) | — | — | **Invisible** | **Abandoned.** 0 bridge calls logged. Most likely the global bridge pointer is never set when `Bootstrap` is suppressed, so every call site takes its `jz` fallback and the patched VTable is unreachable (unverified, see 6.2). Approach discarded in favour of Test E. |
+| **Test E** | External `App::MeshExtension` tracing with `AXL_SUPPRESS_BUILTIN=1` + `AXL_MESH_TRACE=<filter>` | ❌ Intercepted (no-op) | — | — | **Invisible** | All external hooks fire (`PostLoad`, `FindAppearance`, `LoadMaterialsAsync`). **`PrepareMeshState` reports `dynamic=false` for all affected meshes** → no `MeshState` → `OnFindAppearance` skips, material job aborts (`no target mesh state`) although `unresolved=true`. Every appearance reports `chunks=44` regardless of mesh (suspicious). Log: `ArchiveXL-2026-10-29-02-48-27.log`. |
+| **Test E2** | As Test E + name/hash dump + RTTI layout check | ❌ Intercepted (no-op) | — | — | **Invisible** | **RTTI layout matches SDK** (no offset shift). **CNames resolve correctly.** The meshes contain no `@` template markers; `chunks=44` is the real submesh count. `dynamic=false` is therefore **correct**: these are static meshes and the external `MeshExtension` legitimately ignores them. New question: what does the built-in DynamicMesh do for *static* meshes that 2.5 depends on? Log: `ArchiveXL-2026-10-29-02-53-10.log`. |
+| **Test E3** | As E2 + requested material names and material state after the engine load job, run with `AXL_SUPPRESS_BUILTIN=1` and `=0` | 1: ❌ / 0: ✅ | — | — | 1: **Invisible** / 0: **Visible** | **Smoking gun.** Same request (`black`, `latex_black_v1`, …). Built-in active: material loads as `CMaterialInstance` with `base=engine\materials\metal_base.remt` / `multilayered.mt`. Built-in suppressed: the **same material comes back as a bare `CMaterialTemplate`** (unresolved). Exception: `s1_nd_aquelyras_neozima_boots` resolves correctly in both runs. So in 2.5 the engine's own `LoadMaterialsAsync` no longer fully resolves certain *static* mesh materials; the built-in DynamicMesh finishes that job. Logs: `ArchiveXL-2026-10-29-02-57-00.log` (=1), `ArchiveXL-2026-10-29-02-59-25.log` (=0). |
+| **Test E4** | As E3 + material entry dump (local/external, index, buffer sizes) and the template's own resource path | 1 | — | — | **Invisible** | **Root cause candidate.** All materials are local (`external=0`, buffer headers = entries). Failing meshes (belt, punk shoes) request a chunk material **`material_01_multilayer` that has no entry in the mesh** (`NOT FOUND`); the working neozima boots have it (entry 0). For the failing meshes *every* material in the request, including valid ones such as `black` (entry 13) and `latex_black_v1` (entry 0), comes back as `engine\materials\fallback.remt`. Conclusion: in 2.5 one missing chunk material makes `LoadMaterialsAsync` fall back for the whole request; the built-in DynamicMesh compensates (in E3 `material_01_multilayer` became an empty `CMaterialInstance`, the rest resolved). Log: `ArchiveXL-2026-10-29-03-04-26.log`. |
+| **Test F** | Fix: `MeshExtension::LoadMaterialsWithMissingEntries`, built-in suppressed. Toggle `AXL_FIX_MISSING_MATERIALS=0` disables it | 1 | — | — | **Visible** ✅ | **Root cause confirmed.** With the built-in service suppressed, belt, punk shoes and goth shoes all render. Log shows substitution of `material_01_multilayer` on exactly the affected meshes (belt, punk shoes L/R, goth shoes L/R); no new errors. Log: `ArchiveXL-2026-10-29-03-10-25.log`. |
+| **Test G** | Broad regression test: many different clothing mods with the fix, built-in suppressed | 1 | — | — | *pending* | Checks that the fix does not change any other mesh and lists all meshes it applies to (`requests undefined chunk materials`). |
 
 ---
 
@@ -159,7 +174,10 @@ During investigation, three earlier hypotheses were rigorously disproven:
 
 ## 6. Implementation & Resolution Strategy
 
-### 6.1 Clean Upstream Integration (Definitive Resolution)
+### 6.1 ~~Clean Upstream Integration~~ (Superseded by Test F, see section 0)
+
+> [!NOTE]
+> Re-enabling the built-in service works, but only because the built-in DynamicMesh masks undefined chunk materials. The fix from Test F addresses the actual cause and keeps the built-in service suppressed as upstream intends. Kept here for reference.
 To permanently resolve the regression without conflict:
 1. **Allow REDengine's Built-in ExtensionService to Bootstrap:**
    In [ExtensionService.cpp](src/App/Extensions/ExtensionService.cpp), set `AXL_SUPPRESS_BUILTIN_EXTENSIONS = 0`.
@@ -174,17 +192,41 @@ To permanently resolve the regression without conflict:
 
 ---
 
-### 6.2 Post-Mortem on Solution 1 (Bridge VTable Hook)
-- **Concept:** Keep `Raw::ExtensionService::Bootstrap` suppressed (`AXL_SUPPRESS_BUILTIN_EXTENSIONS = 1`) and overwrite the Bridge VTable (`vfunc[+0x68]`, `vfunc[+0x70]`, `vfunc[+0x78]`) at RVA `0x36EBA40` to route calls into external `App::MeshExtension`.
-- **Outcome:** **Failed (In-game items invisible, 0 Bridge calls logged).**
-- **Disassembly Analysis:**
-  1. In `Cyberpunk2077.exe`, `Raw::ExtensionService::Bootstrap` (entry at RVA `0x2224D70`) executes `call 0x2301410`, which initializes the Bridge and writes the Bridge pointer to global instance `0x4334610`.
-  2. Over 70 engine subsystems call `0x2224D70` (`GetExtensionBridge()`).
-  3. When `Bootstrap` is no-op intercepted, `0x4334610` remains an uninitialized NULL structure. Consequently, engine callers never execute indirect virtual dispatch on the Bridge, and no calls ever reached the hooked VTable.
-- **Git History Insight:**
-  In psiberx's repository:
-  - Commit `205accc`: *Support patch 2.5* (introduced Bootstrap suppression).
-  - Commit `e93ba2f`: *Re-enable built-in extension service* (removed Bootstrap suppression — everything worked).
-  - Commit `1417f40` (v1.28.2): *Disable built-in extension service* (re-introduced Bootstrap suppression — caused the Patch 2.5 Dynamic Mesh regression).
-- **Conclusion:**
-  Suppressing `Raw::ExtensionService::Bootstrap` is inherently destructive to REDengine 2.5's subsystem architecture. Keeping `AXL_SUPPRESS_BUILTIN_EXTENSIONS = 0` is the single architecturally correct resolution.
+### 6.2 Test D (Bridge VTable Hook): Abandoned
+- **Concept:** Keep `Raw::ExtensionService::Bootstrap` suppressed and overwrite the Bridge VTable (`vfunc[+0x68]`, `+0x70`, `+0x78`) at RVA `0x36EBA40` to route calls into external `App::MeshExtension`.
+- **Outcome:** Items invisible, 0 bridge calls logged. The code has been removed.
+- **Most likely cause:** every bridge call site loads the global bridge pointer and checks it (`test rcx, rcx` / `jz fallback`). Without `Bootstrap` that pointer stays `nullptr`, so no call ever dispatches through the VTable and the patch is unreachable.
+- **Caveats (unverified / contradictory in earlier notes):**
+  - Bridge global is given as `0x143BCDBE0` (section 3.1) and as RVA `0x4334610`; `Bootstrap` as `0x14231F0A0` (section 3.3) and as RVA `0x2224D70`, which is also labelled `GetExtensionBridge()`. Call site count: 59 vs. "70+". These need to be reconciled by logging both globals in Test A and Test B.
+  - Section 4.2 shows no null check before `call [rax+70h]`; if the bridge were really `nullptr` in Test B without such a check, the game would crash rather than render invisibly.
+- **Why it was dropped:** even with a live bridge, routing it into `App::MeshExtension` would double-process meshes, because `App::MeshExtension` already hooks `CMesh::FindAppearance` / `LoadMaterialsAsync` directly. The real question is why those direct hooks do not work on 2.5 (Test E).
+- **Git history:** `205accc` *Support patch 2.5* → `e93ba2f` *Re-enable built-in extension service* (26 Oct) → `1417f40` *Disable built-in extension service* (28 Oct). The reason for the final disable is undocumented; re-enabling it (6.1) should not be considered final until that reason is known.
+
+### 6.3 Test E: Tracing the External `App::MeshExtension` (Option A)
+**Hypothesis:** with the built-in service suppressed (upstream's intended setup), ArchiveXL's own hooks on `CMesh::FindAppearance`, `CMesh::LoadMaterialsAsync` and `CMesh::PostLoad` (via `ResourcePatchExtension` → `PrepareMeshState`) should resolve dynamic materials. Since items are invisible in Test B, one of these steps fails silently on 2.5.
+
+**Runtime switches (no recompile needed):** read from the process environment first, then from `red4ext/plugins/ArchiveXL/axl_debug.ini` (`KEY=VALUE` per line). Use the file when launching via Steam, which does not forward console environment variables. The resolved file path is logged at startup (`[TruthLogger] Debug settings file: ...`).
+| Env variable | Effect |
+| :--- | :--- |
+| `AXL_SUPPRESS_BUILTIN=1` | Suppresses the built-in ExtensionService (overrides the compile-time default `AXL_SUPPRESS_BUILTIN_EXTENSIONS`). |
+| `AXL_MESH_TRACE=<substring>` | Logs `[MeshTrace]` lines for every mesh whose path contains `<substring>` (e.g. `aquelyras`). `*` traces all dynamic meshes (noisy; use if the path only resolves to a hash). |
+| `AXL_BISECT=<mode>` | Unchanged; only active when the built-in service is not suppressed. |
+| `AXL_FIX_MISSING_MATERIALS=0` | Disables the Test F fix (enabled by default). Each mesh the fix applies to is logged once as `Mesh "..." requests undefined chunk materials [...]`, independent of `AXL_MESH_TRACE`. |
+
+The compile-time default of `AXL_SUPPRESS_BUILTIN_EXTENSIONS` is now `1` (upstream behaviour), since the fix makes the built-in service unnecessary.
+
+**Trace points and what each failure means:**
+| Log line | Failure signature | Interpretation |
+| :--- | :--- | :--- |
+| `PrepareMeshState ... dynamic=` | Line missing, or `dynamic=false` | `CMesh::PostLoad` hook not firing on 2.5, or the mesh is not detected as dynamic → no `MeshState`. |
+| `OnFindAppearance ...` | Line missing | `CMesh::FindAppearance` hook not reached (wrong address / function replaced in 2.5). |
+| `-> SKIPPED: no mesh state` | — | `PrepareMeshState` did not run for this mesh. |
+| `-> processed, chunks=[...]` | Chunk names lack the expected `appearance@template` expansion | Expansion logic broken. |
+| `OnLoadMaterials ... tokenMaterials= unresolved=` | Line missing | `CMesh::LoadMaterialsAsync` hook not reached. |
+| `-> EARLY RETURN` | `names != tokenMaterials` or `unresolved=false` | Likely `MeshMaterialsToken` layout or `LoadMaterialsAsync` signature changed in 2.5. |
+| `-> job ABORTED: no ... mesh state` | — | Mesh state lookup fails at job time. |
+| `-> job running` but still invisible | Check for `[DynamicMesh]` errors right after | Failure inside `ProcessDynamicMaterials`. |
+
+**Procedure:**
+1. Put `AXL_SUPPRESS_BUILTIN=1` and `AXL_MESH_TRACE=aquelyras` into `axl_debug.ini`, launch the game, equip belt + shoes, collect `ArchiveXL-*.log`.
+2. Repeat with `AXL_SUPPRESS_BUILTIN=0` (same trace filter) as the visible reference and diff the `[MeshTrace]` sequences.

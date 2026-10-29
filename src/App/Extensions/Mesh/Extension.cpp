@@ -1,6 +1,7 @@
 #include "Extension.hpp"
 #include "App/Extensions/Garment/Extension.hpp"
 #include "App/Extensions/ResourcePatch/Extension.hpp"
+#include "App/Utils/DebugSettings.hpp"
 #include "App/Utils/Str.hpp"
 #include "Core/Facades/Container.hpp"
 
@@ -38,7 +39,46 @@ bool App::MeshExtension::Load()
 
     s_resourcePathRegistry = Core::Resolve<ResourcePathRegistry>();
 
+    s_traceFilter = DebugSettings::Get("AXL_MESH_TRACE");
+    s_fixMissingMaterials = DebugSettings::Get("AXL_FIX_MISSING_MATERIALS") != "0";
+
+    LogInfo(R"([{}] Missing chunk material fix: {}.)", ExtensionName, s_fixMissingMaterials ? "enabled" : "disabled");
+
+    if (!s_traceFilter.empty())
+    {
+        LogInfo(R"([{}] [MeshTrace] Tracing enabled for mesh paths containing "{}".)", ExtensionName, s_traceFilter);
+
+        // Compare runtime RTTI layout with the compiled SDK layout to detect shifted fields in 2.5
+        auto LogOffset = [](Red::CClass* aClass, const char* aProp, size_t aCompiled) {
+            auto* prop = aClass ? aClass->GetProperty(aProp) : nullptr;
+            LogInfo(R"([{}] [MeshTrace] Layout {}::{} runtime={} compiled={:#x}{})", ExtensionName,
+                    aClass ? aClass->GetName().ToString() : "?", aProp,
+                    prop ? std::format("{:#x}", prop->valueOffset) : std::string("missing"), aCompiled,
+                    (prop && prop->valueOffset != aCompiled) ? "  <-- MISMATCH" : "");
+        };
+
+        auto* appearanceClass = Red::GetClass<Red::meshMeshAppearance>();
+        LogOffset(appearanceClass, "name", offsetof(Red::meshMeshAppearance, name));
+        LogOffset(appearanceClass, "chunkMaterials", offsetof(Red::meshMeshAppearance, chunkMaterials));
+        LogOffset(appearanceClass, "tags", offsetof(Red::meshMeshAppearance, tags));
+
+        auto* meshClass = Red::GetClass<Red::CMesh>();
+        LogOffset(meshClass, "appearances", offsetof(Red::CMesh, appearances));
+        LogOffset(meshClass, "materialEntries", offsetof(Red::CMesh, materialEntries));
+    }
+
     return true;
+}
+
+bool App::MeshExtension::IsTraced(Red::CMesh* aMesh)
+{
+    if (s_traceFilter.empty() || !aMesh || !aMesh->path)
+        return false;
+
+    if (s_traceFilter == "*")
+        return IsDynamicMesh(aMesh);
+
+    return s_resourcePathRegistry->ResolvePathOrHash(aMesh->path).find(s_traceFilter) != std::string::npos;
 }
 
 bool App::MeshExtension::Unload()
@@ -59,6 +99,17 @@ bool App::MeshExtension::Unload()
 void App::MeshExtension::OnFindAppearance(Red::Handle<Red::meshMeshAppearance>& aAppearance, Red::CMesh* aMesh,
                                           Red::CName aName)
 {
+    const auto traced = IsTraced(aMesh);
+
+    if (traced)
+    {
+        LogInfo(R"([{}] [MeshTrace] OnFindAppearance "{}" app="{}" handle={} owner={} meshState={} chunks={})",
+                ExtensionName, s_resourcePathRegistry->ResolvePathOrHash(aMesh->path), aName.ToString(),
+                static_cast<bool>(aAppearance),
+                aAppearance ? static_cast<bool>(Raw::MeshAppearance::Owner::Ptr(aAppearance)) : false,
+                HasMeshState(aMesh), aAppearance ? aAppearance->chunkMaterials.Size() : 0u);
+    }
+
     if (!aAppearance)
         return;
 
@@ -82,6 +133,23 @@ void App::MeshExtension::OnFindAppearance(Red::Handle<Red::meshMeshAppearance>& 
         std::unique_lock _(meshState->meshMutex);
 
         ProcessAppearance(aMesh, meshState, aAppearance);
+
+        if (traced)
+        {
+            std::string chunkList;
+            for (const auto chunkName : aAppearance->chunkMaterials)
+            {
+                chunkList.append(chunkName.ToString()).append(" ");
+            }
+
+            LogInfo(R"([{}] [MeshTrace]   -> processed, chunks=[{}] materialEntries={})",
+                    ExtensionName, chunkList, aMesh->materialEntries.Size());
+        }
+    }
+    else if (traced)
+    {
+        LogInfo(R"([{}] [MeshTrace]   -> SKIPPED: no mesh state (PrepareMeshState not run or mesh not dynamic))",
+                ExtensionName);
     }
 }
 
@@ -204,11 +272,114 @@ bool App::MeshExtension::OnPreloadAppearances(Red::CMesh* aMesh)
 void* App::MeshExtension::OnLoadMaterials(Red::CMesh* aTargetMesh, Red::MeshMaterialsToken& aToken,
                                           const Red::DynArray<Red::CName>& aMaterialNames, uint8_t a4)
 {
+    if (s_fixMissingMaterials && aTargetMesh->path && !aMaterialNames.IsEmpty() && !HasMeshState(aTargetMesh))
+    {
+        if (auto* result = LoadMaterialsWithMissingEntries(aTargetMesh, aToken, aMaterialNames, a4))
+            return result;
+    }
+
     Raw::CMesh::LoadMaterialsAsync(aTargetMesh, aToken, aMaterialNames, a4);
+
+    const auto traced = IsTraced(aTargetMesh);
+
+    if (traced)
+    {
+        const auto hasData = static_cast<bool>(aToken.data);
+        LogInfo(R"([{}] [MeshTrace] OnLoadMaterials "{}" names={} tokenData={} tokenMaterials={} unresolved={} a4={})",
+                ExtensionName, s_resourcePathRegistry->ResolvePathOrHash(aTargetMesh->path), aMaterialNames.Size(),
+                hasData, hasData ? aToken.data->materials.Size() : 0u,
+                hasData ? HasUnresolvedMaterials(aToken.data->materials) : false, a4);
+
+        std::string nameList;
+        for (const auto materialName : aMaterialNames)
+        {
+            nameList.append(materialName.ToString()).append(" ");
+        }
+        LogInfo(R"([{}] [MeshTrace]   requested=[{}])", ExtensionName, nameList);
+
+        // Inspect the materials once the engine's own load job has finished
+        if (hasData)
+        {
+            Red::JobQueue traceQueue;
+            traceQueue.Wait(aToken.job);
+            traceQueue.Dispatch([meshPathStr = s_resourcePathRegistry->ResolvePathOrHash(aTargetMesh->path),
+                                 meshWeak = Red::AsWeakHandle(aTargetMesh),
+                                 materialNames = aMaterialNames, materialData = aToken.data]() {
+                if (auto mesh = meshWeak.Lock())
+                {
+                    LogInfo(R"([{}] [MeshTrace]   mesh "{}" entries={} external={} localInstances={} localBufferHeaders={})",
+                            ExtensionName, meshPathStr, mesh->materialEntries.Size(), mesh->externalMaterials.Size(),
+                            mesh->localMaterialInstances.Size(), mesh->localMaterialBuffer.rawDataHeaders.Size());
+
+                    for (const auto materialName : materialNames)
+                    {
+                        int32_t entryIndex = -1;
+                        for (uint32_t e = 0; e < mesh->materialEntries.Size(); ++e)
+                        {
+                            if (mesh->materialEntries[e].name == materialName)
+                            {
+                                entryIndex = static_cast<int32_t>(e);
+                                break;
+                            }
+                        }
+
+                        if (entryIndex < 0)
+                        {
+                            LogInfo(R"([{}] [MeshTrace]   entry "{}" NOT FOUND)", ExtensionName, materialName.ToString());
+                            continue;
+                        }
+
+                        const auto& entry = mesh->materialEntries[entryIndex];
+                        std::string source;
+                        if (!entry.isLocalInstance && entry.index < mesh->externalMaterials.Size())
+                        {
+                            source = s_resourcePathRegistry->ResolvePathOrHash(
+                                mesh->externalMaterials[entry.index].path);
+                        }
+
+                        LogInfo(R"([{}] [MeshTrace]   entry "{}" at {} local={} index={} external="{}")",
+                                ExtensionName, materialName.ToString(), entryIndex, entry.isLocalInstance,
+                                entry.index, source);
+                    }
+                }
+
+                for (uint32_t i = 0; i < materialData->materials.Size(); ++i)
+                {
+                    const auto& material = materialData->materials[i];
+                    const auto nameStr = i < materialNames.Size() ? materialNames[i].ToString() : "?";
+
+                    if (!material)
+                    {
+                        LogInfo(R"([{}] [MeshTrace]   after-load "{}" [{}] "{}" = null)", ExtensionName,
+                                meshPathStr, i, nameStr);
+                        continue;
+                    }
+
+                    LogInfo(R"([{}] [MeshTrace]   after-load "{}" [{}] "{}" = {} self={} base={} unresolved={})",
+                            ExtensionName, meshPathStr, i, nameStr, material->GetType()->GetName().ToString(),
+                            s_resourcePathRegistry->ResolvePathOrHash(material->path),
+                            s_resourcePathRegistry->ResolvePathOrHash(material->baseMaterial.path),
+                            IsUnresolvedMaterial(material));
+                }
+            });
+        }
+    }
 
     if (!aTargetMesh->path || aMaterialNames.IsEmpty() || aToken.data->materials.Size() != aMaterialNames.Size()
         || !HasUnresolvedMaterials(aToken.data->materials))
+    {
+        if (traced)
+        {
+            LogInfo(R"([{}] [MeshTrace]   -> EARLY RETURN (no dynamic resolution scheduled))", ExtensionName);
+        }
+
         return &aToken;
+    }
+
+    if (traced)
+    {
+        LogInfo(R"([{}] [MeshTrace]   -> dispatching dynamic material job)", ExtensionName);
+    }
 
     Red::JobQueue jobQueue;
     jobQueue.Wait(aToken.job);
@@ -225,7 +396,14 @@ void* App::MeshExtension::OnLoadMaterials(Red::CMesh* aTargetMesh, Red::MeshMate
         auto targetMeshState = FindMeshState(targetMesh);
 
         if (!targetMeshState)
+        {
+            if (IsTraced(targetMesh))
+            {
+                LogInfo(R"([{}] [MeshTrace]   -> job ABORTED: no target mesh state for "{}")",
+                        ExtensionName, s_resourcePathRegistry->ResolvePathOrHash(targetMesh->path));
+            }
             return;
+        }
 
         Red::Handle<Red::CMesh> sourceMesh;
         Core::SharedPtr<MeshState> sourceMeshState;
@@ -246,7 +424,21 @@ void* App::MeshExtension::OnLoadMaterials(Red::CMesh* aTargetMesh, Red::MeshMate
         }
 
         if (!sourceMeshState)
+        {
+            if (IsTraced(targetMesh))
+            {
+                LogInfo(R"([{}] [MeshTrace]   -> job ABORTED: no source mesh state for "{}")",
+                        ExtensionName, s_resourcePathRegistry->ResolvePathOrHash(sourceMesh->path));
+            }
             return;
+        }
+
+        if (IsTraced(targetMesh))
+        {
+            LogInfo(R"([{}] [MeshTrace]   -> job running for "{}" (source "{}"))", ExtensionName,
+                    s_resourcePathRegistry->ResolvePathOrHash(targetMesh->path),
+                    s_resourcePathRegistry->ResolvePathOrHash(sourceMesh->path));
+        }
 
         std::unique_lock _(targetMeshState->meshMutex);
 
@@ -273,6 +465,96 @@ void* App::MeshExtension::OnLoadMaterials(Red::CMesh* aTargetMesh, Red::MeshMate
         });
 
         targetMeshState->lastJob = std::move(jobQueue.Capture());
+    });
+
+    aToken.job = std::move(jobQueue.Capture());
+
+    return &aToken;
+}
+
+// Since patch 2.5, CMesh::LoadMaterialsAsync falls back to engine\materials\fallback.remt for the whole request
+// when any requested chunk material has no entry in the mesh, so every chunk of the mesh renders invisible.
+// The built-in DynamicMesh extension compensates for this; when it is disabled, load the valid materials
+// with the missing names substituted, then put an empty material into the missing slots only.
+void* App::MeshExtension::LoadMaterialsWithMissingEntries(Red::CMesh* aTargetMesh, Red::MeshMaterialsToken& aToken,
+                                                          const Red::DynArray<Red::CName>& aMaterialNames,
+                                                          uint8_t a4)
+{
+    Core::Vector<uint32_t> missingSlots;
+    Red::CName substituteName;
+
+    {
+        std::shared_lock _(Raw::CMesh::MaterialLock::Ref(aTargetMesh));
+
+        for (uint32_t slot = 0; slot < aMaterialNames.Size(); ++slot)
+        {
+            const auto materialName = aMaterialNames[slot];
+            const auto found = std::ranges::any_of(aTargetMesh->materialEntries, [materialName](const auto& aEntry) {
+                return aEntry.name == materialName;
+            });
+
+            if (!found)
+            {
+                missingSlots.push_back(slot);
+            }
+            else if (!substituteName)
+            {
+                substituteName = materialName;
+            }
+        }
+
+        if (missingSlots.empty())
+            return nullptr;
+
+        if (!substituteName)
+        {
+            if (aTargetMesh->materialEntries.IsEmpty())
+                return nullptr;
+
+            substituteName = aTargetMesh->materialEntries[0].name;
+        }
+    }
+
+    // Kept alive until the load job has finished in case the engine reads the names asynchronously
+    auto substitutedNames = Core::MakeShared<Red::DynArray<Red::CName>>(aMaterialNames);
+    for (const auto slot : missingSlots)
+    {
+        (*substitutedNames)[slot] = substituteName;
+    }
+
+    Raw::CMesh::LoadMaterialsAsync(aTargetMesh, aToken, *substitutedNames, a4);
+
+    bool firstReport;
+    {
+        std::unique_lock _(s_missingReportLock);
+        firstReport = s_missingReported.insert(aTargetMesh->path).second;
+    }
+
+    if (firstReport || IsTraced(aTargetMesh))
+    {
+        std::string missingList;
+        for (const auto slot : missingSlots)
+        {
+            if (!missingList.empty())
+                missingList.append(", ");
+            missingList.append(aMaterialNames[slot].ToString());
+        }
+
+        LogInfo(R"([{}] Mesh "{}" requests undefined chunk materials [{}], substituted with "{}".)", ExtensionName,
+                s_resourcePathRegistry->ResolvePathOrHash(aTargetMesh->path), missingList,
+                substituteName.ToString());
+    }
+
+    Red::JobQueue jobQueue;
+    jobQueue.Wait(aToken.job);
+    jobQueue.Dispatch([materialData = aToken.data, missingSlots = std::move(missingSlots), substitutedNames]() {
+        for (const auto slot : missingSlots)
+        {
+            if (slot < materialData->materials.Size())
+            {
+                materialData->materials[slot] = s_dummyMaterial;
+            }
+        }
     });
 
     aToken.job = std::move(jobQueue.Capture());
@@ -1024,6 +1306,43 @@ bool App::MeshExtension::HasMeshState(Red::CMesh* aMesh)
 
 void App::MeshExtension::PrepareMeshState(Red::CMesh* aMesh, const Core::Map<Red::CName, std::string>& aContext)
 {
+    if (IsTraced(aMesh))
+    {
+        LogInfo(R"([{}] [MeshTrace] PrepareMeshState "{}" dynamic={} materialEntries={} appearances={} context={})",
+                ExtensionName, s_resourcePathRegistry->ResolvePathOrHash(aMesh->path), IsDynamicMesh(aMesh),
+                aMesh->materialEntries.Size(), aMesh->appearances.Size(), aContext.size());
+
+        constexpr uint32_t MaxDump = 6;
+
+        for (uint32_t i = 0; i < aMesh->materialEntries.Size() && i < MaxDump; ++i)
+        {
+            const auto& entry = aMesh->materialEntries[i];
+            LogInfo(R"([{}] [MeshTrace]   material[{}] name="{}" hash={:#018x} local={} index={})", ExtensionName, i,
+                    entry.name.ToString(), entry.name.hash, entry.isLocalInstance, entry.index);
+        }
+
+        for (uint32_t i = 0; i < aMesh->appearances.Size() && i < 2; ++i)
+        {
+            const auto& appearance = aMesh->appearances[i];
+            if (!appearance)
+            {
+                LogInfo(R"([{}] [MeshTrace]   appearance[{}] = null)", ExtensionName, i);
+                continue;
+            }
+
+            LogInfo(R"([{}] [MeshTrace]   appearance[{}] name="{}" hash={:#018x} chunks={} tags={})", ExtensionName, i,
+                    appearance->name.ToString(), appearance->name.hash, appearance->chunkMaterials.Size(),
+                    appearance->tags.Size());
+
+            for (uint32_t j = 0; j < appearance->chunkMaterials.Size() && j < MaxDump; ++j)
+            {
+                const auto chunkName = appearance->chunkMaterials[j];
+                LogInfo(R"([{}] [MeshTrace]     chunk[{}] name="{}" hash={:#018x})", ExtensionName, j,
+                        chunkName.ToString(), chunkName.hash);
+            }
+        }
+    }
+
     if (IsDynamicMesh(aMesh))
     {
         auto meshState = AcquireMeshState(aMesh);
