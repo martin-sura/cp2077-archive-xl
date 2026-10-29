@@ -76,7 +76,7 @@ bool App::MeshExtension::IsTraced(Red::CMesh* aMesh)
         return false;
 
     if (s_traceFilter == "*")
-        return IsDynamicMesh(aMesh);
+        return true;
 
     return s_resourcePathRegistry->ResolvePathOrHash(aMesh->path).find(s_traceFilter) != std::string::npos;
 }

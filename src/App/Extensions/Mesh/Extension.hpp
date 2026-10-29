@@ -131,7 +131,7 @@ private:
     inline static Red::SharedSpinLock s_stateLock;
     inline static Core::SharedPtr<ResourcePathRegistry> s_resourcePathRegistry;
 
-    // Diagnostic tracing (see DEBUGGING_NOTES.md, Test E). Enabled via AXL_MESH_TRACE=<path substring>.
+    // Diagnostic tracing (see DEBUGGING_NOTES.md, section 3). Enabled via AXL_MESH_TRACE=<path substring> or "*".
     static bool IsTraced(Red::CMesh* aMesh);
     inline static std::string s_traceFilter;
     inline static bool s_fixMissingMaterials{true};
