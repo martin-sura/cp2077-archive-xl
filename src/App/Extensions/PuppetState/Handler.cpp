@@ -56,30 +56,6 @@ App::PuppetStateHandler::PuppetStateHandler(Red::Entity* aPuppet)
     UpdateFeetState(m_puppetWeak.Lock());
 }
 
-// void App::PuppetStateHandler::OnItemEquipped(const Red::ItemID& aItemID, Red::TweakDBID aSlotID)
-// {
-// #ifndef NDEBUG
-//     auto debugSlotName = Red::ToStringDebug(aSlotID);
-//     auto debugItemName = Red::ToStringDebug(aItemID.tdbid);
-//     Core::Log::Debug("|PuppetState| [event=OnItemEquipped slot={} item={}]",
-//                      debugSlotName.c_str(), debugItemName.c_str());
-// #endif
-//
-//     HandleAppearanceChange(aItemID, aSlotID, true);
-// }
-
-// void App::PuppetStateHandler::OnItemEquippedVisual(const Red::ItemID& aItemID, Red::TweakDBID aSlotID)
-// {
-// #ifndef NDEBUG
-//     auto debugSlotName = Red::ToStringDebug(aSlotID);
-//     auto debugItemName = Red::ToStringDebug(aItemID.tdbid);
-//     Core::Log::Debug("|PuppetState| [event=OnItemEquippedVisual slot={} item={}]",
-//                      debugSlotName.c_str(), debugItemName.c_str());
-// #endif
-//
-//     HandleAppearanceChange(aItemID, aSlotID, true);
-// }
-
 void App::PuppetStateHandler::OnItemEquippedComplete(const Red::ItemID& aItemID, Red::TweakDBID aSlotID)
 {
 #ifndef NDEBUG
@@ -92,18 +68,6 @@ void App::PuppetStateHandler::OnItemEquippedComplete(const Red::ItemID& aItemID,
     FinalizeAppearanceChange(aItemID, aSlotID, true);
 }
 
-// void App::PuppetStateHandler::OnItemUnequipped(const Red::ItemID& aItemID, Red::TweakDBID aSlotID)
-// {
-// #ifndef NDEBUG
-//     auto debugSlotName = Red::ToStringDebug(aSlotID);
-//     auto debugItemName = Red::ToStringDebug(aItemID.tdbid);
-//     Core::Log::Debug("|PuppetState| [event=OnItemUnequipped slot={} item={}]",
-//                      debugSlotName.c_str(), debugItemName.c_str());
-// #endif
-//
-//     HandleAppearanceChange(aItemID, aSlotID, false);
-// }
-
 void App::PuppetStateHandler::OnItemUnequippedComplete(const Red::ItemID& aItemID, Red::TweakDBID aSlotID)
 {
 #ifndef NDEBUG
@@ -115,39 +79,6 @@ void App::PuppetStateHandler::OnItemUnequippedComplete(const Red::ItemID& aItemI
 
     FinalizeAppearanceChange(aItemID, aSlotID, false);
 }
-
-// void App::PuppetStateHandler::HandleAppearanceChange(const Red::ItemID& aItemID, Red::TweakDBID aSlotID, bool aEquipped)
-// {
-//     auto puppet = m_puppetWeak.Lock();
-//     if (puppet)
-//     {
-// #ifndef NDEBUG
-//         auto debugSlotName = Red::ToStringDebug(aSlotID);
-//         auto debugItemName = Red::ToStringDebug(aItemID.tdbid);
-// #endif
-//
-//         if (IsWeaponSlot(aSlotID))
-//         {
-//             if (UpdateArmsState(puppet, aItemID, aEquipped))
-//             {
-//                 RefreshArmsDependentAppearances(puppet);
-//             }
-//         }
-//
-//         if (IsFeetSlot(aSlotID) || HidesFootwear(puppet, aItemID))
-//         {
-//             if (UpdateFeetState(puppet))
-//             {
-//                 RefreshFeetDependentAppearances(puppet);
-//             }
-//         }
-//
-//         if (IsTorsoSlot(aSlotID) && RollsUpSleeves(puppet, aItemID))
-//         {
-//             RefreshSleevesDependentAppearances(puppet);
-//         }
-//     }
-// }
 
 void App::PuppetStateHandler::FinalizeAppearanceChange(const Red::ItemID& aItemID, Red::TweakDBID aSlotID, bool aEquipped)
 {
@@ -242,26 +173,48 @@ App::PuppetFeetState App::PuppetStateHandler::ResolveFeetState(const Red::Handle
 
     for (const auto& slotID : m_feetSlots)
     {
-        auto [itemObject, _] = GetItemInSlot(aPuppet, slotID);
-        if (itemObject && IsVisible(itemObject))
+        auto [itemObject, isSpawning] = GetItemInSlot(aPuppet, slotID);
+        auto debugSlot = Red::ToStringDebug(slotID);
+        if (itemObject)
         {
-            if (IsHighHeels(itemObject))
+            Red::CName vfuncApp;
+            Raw::ItemObject::GetAppearanceName(itemObject, vfuncApp);
+            auto debugItem = Red::ToStringDebug(Raw::ItemObject::ItemID::Ref(itemObject).tdbid);
+            bool visible = IsVisible(itemObject);
+            bool highHeels = visible && IsHighHeels(itemObject);
+            bool flatSole = visible && !highHeels && IsFlatSole(itemObject);
+
+            Core::Log::Info("[TruthLogger][PuppetState] ResolveFeetState ent={} slot={} item={} entApp(0xE8)='{}' vfuncApp(0x288)='{}' visible={} highHeels={} flatSole={}",
+                            aPuppet ? aPuppet->entityID.hash : 0, debugSlot.c_str(), debugItem.c_str(),
+                            itemObject->appearanceName.ToString(), vfuncApp.ToString(), visible, highHeels, flatSole);
+
+            if (visible)
             {
-                state = PuppetFeetState::HighHeels;
+                if (highHeels)
+                {
+                    state = PuppetFeetState::HighHeels;
+                    break;
+                }
+
+                if (flatSole)
+                {
+                    state = PuppetFeetState::FlatShoes;
+                    break;
+                }
+
+                state = PuppetFeetState::Lifted;
                 break;
             }
-
-            if (IsFlatSole(itemObject))
-            {
-                state = PuppetFeetState::FlatShoes;
-                break;
-            }
-
-            state = PuppetFeetState::Lifted;
-            break;
+        }
+        else
+        {
+            Core::Log::Info("[TruthLogger][PuppetState] ResolveFeetState ent={} slot={} itemObject=NULL isSpawning={}",
+                            aPuppet ? aPuppet->entityID.hash : 0, debugSlot.c_str(), isSpawning);
         }
     }
 
+    Core::Log::Info("[TruthLogger][PuppetState] ResolveFeetState ent={} result={}",
+                    aPuppet ? aPuppet->entityID.hash : 0, static_cast<int32_t>(state));
     return state;
 }
 
@@ -389,20 +342,31 @@ void App::PuppetStateHandler::RefreshDependentAppearances(const Red::Handle<Red:
 {
     for (const auto& slotID : aSlotIDs)
     {
-#ifndef NDEBUG
-        auto debugSlotName = Red::ToStringDebug(slotID);
-#endif
-
         auto [itemObject, isSpawning] = GetItemInSlot(aPuppet, slotID);
         if (itemObject)
         {
-            if (IsVisible(itemObject) && (IsDynamicAppearance(itemObject) || ReactsToSuffix(itemObject, aSuffixIDs)))
+            Red::CName vfuncApp;
+            Raw::ItemObject::GetAppearanceName(itemObject, vfuncApp);
+            auto debugSlot = Red::ToStringDebug(slotID);
+            auto debugItem = Red::ToStringDebug(Raw::ItemObject::ItemID::Ref(itemObject).tdbid);
+            bool visible = IsVisible(itemObject);
+            bool dynamic = visible && IsDynamicAppearance(itemObject);
+            bool reacts = visible && !dynamic && ReactsToSuffix(itemObject, aSuffixIDs);
+
+            Core::Log::Info("[TruthLogger][PuppetState] RefreshDependent ent={} slot={} item={} vfuncApp(0x288)='{}' visible={} dynamic={} reacts={} -> refresh={}",
+                            aPuppet ? aPuppet->entityID.hash : 0, debugSlot.c_str(), debugItem.c_str(),
+                            vfuncApp.ToString(), visible, dynamic, reacts, (visible && (dynamic || reacts)));
+
+            if (visible && (dynamic || reacts))
             {
                 RefreshItemAppearance(aPuppet, itemObject);
             }
         }
         else if (isSpawning)
         {
+            auto debugSlot = Red::ToStringDebug(slotID);
+            Core::Log::Info("[TruthLogger][PuppetState] RefreshDependent ent={} slot={} itemObject=NULL isSpawning=true -> AddPendingRefresh",
+                            aPuppet ? aPuppet->entityID.hash : 0, debugSlot.c_str());
             AddPendingRefresh(slotID);
         }
     }

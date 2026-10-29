@@ -4,6 +4,7 @@
 #include "App/Extensions/ResourceLink/Extension.hpp"
 #include "App/Utils/Num.hpp"
 #include "App/Utils/Str.hpp"
+#include "Core/Facades/Log.hpp"
 #include "Red/AppearanceChanger.hpp"
 #include "Red/CharacterCustomization.hpp"
 #include "Red/TweakDB.hpp"
@@ -645,6 +646,15 @@ void App::DynamicAppearanceController::CollectStateData(Red::Entity* aEntity)
 
     state.equippedItemID.value = 0;
     state.valid = true;
+
+    Core::Log::Info("[TruthLogger][CollectStateData] entity={} gender={}/{} body={}/{} feet={}/{}",
+                    aEntity ? aEntity->GetType()->GetName().ToString() : "null",
+                    state.values[GenderAttr].value,
+                    state.values[GenderAttr].suffix,
+                    state.values[BodyTypeAttr].value,
+                    state.values[BodyTypeAttr].suffix,
+                    state.values[FeetStateAttr].value,
+                    state.values[FeetStateAttr].suffix);
 }
 
 void App::DynamicAppearanceController::UpdateState(Red::Entity* aEntity, Red::TweakDBID aEquippedItemID)

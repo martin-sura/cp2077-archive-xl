@@ -587,6 +587,15 @@ void App::GarmentExtension::OnProcessGarmentMesh(Raw::GarmentAssembler::ProcessM
             // if (aMeshToken->IsFailed())
             // {
                 auto meshToken = ComponentWrapper(aComponent).LoadResourceToken(false);
+                LogInfo("[TruthLogger][OnProcessGarmentMesh] entity={} comp={} inTokenPath=0x{:X} inLoaded={} inFailed={} outTokenPath=0x{:X} outFinished={} outFailed={}",
+                        entityState->GetName(),
+                        aComponent->name.ToString(),
+                        aMeshToken ? aMeshToken->path.hash : 0ULL,
+                        aMeshToken ? aMeshToken->IsLoaded() : false,
+                        aMeshToken ? aMeshToken->IsFailed() : false,
+                        meshToken ? meshToken->path.hash : 0ULL,
+                        meshToken ? meshToken->IsFinished() : false,
+                        meshToken ? meshToken->IsFailed() : false);
                 if (meshToken->IsFinished())
                 {
                     aCallback(aProcessor, aIndex, aPartTemplate, meshToken, aComponent, aJobGroup);
@@ -596,11 +605,25 @@ void App::GarmentExtension::OnProcessGarmentMesh(Raw::GarmentAssembler::ProcessM
                     Red::JobQueue jobQueue{aJobGroup};
                     jobQueue.Wait(meshToken->job);
                     jobQueue.Dispatch([aCallback, aProcessor, aIndex, aPartTemplate, meshToken, aComponent](const Red::JobGroup& aJobGroup) {
+                        LogInfo("[TruthLogger][OnProcessGarmentMesh::AsyncCallback] comp={} outTokenPath=0x{:X} outLoaded={} outFailed={}",
+                                aComponent->name.ToString(),
+                                meshToken ? meshToken->path.hash : 0ULL,
+                                meshToken ? meshToken->IsLoaded() : false,
+                                meshToken ? meshToken->IsFailed() : false);
                         aCallback(aProcessor, aIndex, aPartTemplate, meshToken, aComponent, aJobGroup);
                     });
                 }
                 return;
             // }
+        }
+        else
+        {
+            LogInfo("[TruthLogger][OnProcessGarmentMesh::Unchanged] entity={} comp={} inTokenPath=0x{:X} inLoaded={} inFailed={}",
+                    entityState->GetName(),
+                    aComponent->name.ToString(),
+                    aMeshToken ? aMeshToken->path.hash : 0ULL,
+                    aMeshToken ? aMeshToken->IsLoaded() : false,
+                    aMeshToken ? aMeshToken->IsFailed() : false);
         }
     }
 
@@ -835,13 +858,18 @@ void App::GarmentExtension::ApplyComponentOverrides(Core::SharedPtr<EntityState>
 
             if (wrapper.IsMeshComponent())
             {
-                LogDebug("[{}] [index={} component={} type={} enabled={} app={} chunks={:064b}]",
+                const auto meshPath = wrapper.GetResourcePath();
+                const bool meshExists = Red::ResourceDepot::Get()->ResourceExists(meshPath);
+                LogDebug("[{}] [index={} component={} type={} enabled={} app={} mesh={} (0x{:X}, exists={}) chunks={:064b}]",
                          ExtensionName,
                          index,
                          component->name.ToString(),
                          component->GetType()->GetName().ToString(),
                          component->isEnabled,
                          wrapper.GetAppearanceName().ToString(),
+                         s_dynamicAppearance->GetPathStringOrHash(meshPath),
+                         meshPath.hash,
+                         meshExists,
                          wrapper.GetChunkMask());
             }
             else

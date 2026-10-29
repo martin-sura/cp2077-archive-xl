@@ -69,12 +69,6 @@ void App::AttachmentExtension::OnInitializeSlots(Red::game::AttachmentSlots* aCo
 {
     if (!aSlotIDs.IsEmpty())
     {
-// #ifndef NDEBUG
-//         const auto entity = Raw::IComponent::Owner::Ptr(aComponent);
-//         const auto entityID = Raw::Entity::EntityID::Ptr(entity);
-//         LogDebug("[{}] [event=InitializeSlots ent={}]", ExtensionName, entityID->hash);
-// #endif
-
         std::unique_lock _(s_slotsMutex);
         auto tweakDB = Red::TweakDB::Get();
 
@@ -117,10 +111,6 @@ bool App::AttachmentExtension::OnSlotSpawningCheck(Red::game::AttachmentSlots* a
 
     if (!result)
     {
-// #ifndef NDEBUG
-//         LogDebug("[{}] [event=SlotSpawningCheck]", ExtensionName);
-// #endif
-
         std::shared_lock _(s_slotsMutex);
         const auto& subSlots = s_extraSlots.find(aSlotID);
         if (subSlots != s_extraSlots.end())
@@ -320,34 +310,22 @@ bool App::AttachmentExtension::IsVisualTagActive(Red::ITransactionSystem* aTrans
 
         if (slotData->itemObject)
         {
-            auto itemAppearance = slotData->itemObject->appearanceName;
-            if (!itemAppearance || itemAppearance == EmptyAppearanceName)
-            {
-                Raw::ItemObject::GetAppearanceName(slotData->itemObject, itemAppearance);
-            }
+            Red::CName itemAppearance;
+            Raw::ItemObject::GetAppearanceName(slotData->itemObject, itemAppearance);
 
-            return itemAppearance && itemAppearance != EmptyAppearanceName &&
-                   aTransactionSystem->MatchVisualTag(slotData->itemObject, aVisualTag, false);
+            const auto entAppearance = slotData->itemObject->appearanceName;
+            const auto& itemID = Raw::ItemObject::ItemID::Ref(slotData->itemObject).tdbid;
+            const auto debugSlot = Red::ToStringDebug(aSlotID);
+            const auto debugItem = Red::ToStringDebug(itemID);
+            const auto visible = (itemAppearance && itemAppearance != EmptyAppearanceName);
+            const auto matched = visible && aTransactionSystem->MatchVisualTag(slotData->itemObject, aVisualTag, false);
+
+            LogInfo("[TruthLogger][Attachment] IsVisualTagActive slot={} item={} entApp(0xE8)='{}' vfuncApp(0x288)='{}' visible={} tag='{}' matched={}",
+                    debugSlot.c_str(), debugItem.c_str(), entAppearance.ToString(), itemAppearance.ToString(),
+                    visible, aVisualTag.ToString(), matched);
+
+            return matched;
         }
-
-//         if (slotData->spawningItemID && slotData->spawningItemID.tdbid != aEquippedItemID)
-//         {
-// #ifndef NDEBUG
-//             auto debugItemName = Red::ToStringDebug(slotData->spawningItemID.tdbid);
-//             auto debugEquipppedItemName = Red::ToStringDebug(aEquippedItemID);
-// #endif
-//
-//             return aTransactionSystem->MatchVisualTagByItemID(slotData->spawningItemID, aOwner, aVisualTag);
-//         }
-
-//         if (slotData->appearanceItemID)
-//         {
-// #ifndef NDEBUG
-//             auto debugItemName = Red::ToStringDebug(slotData->appearanceItemID.tdbid);
-// #endif
-//
-//             return aTransactionSystem->MatchVisualTagByItemID(slotData->appearanceItemID, aOwner, aVisualTag);
-//         }
     }
 
     return false;

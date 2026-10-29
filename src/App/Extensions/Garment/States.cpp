@@ -1,4 +1,5 @@
 #include "States.hpp"
+#include "Core/Facades/Log.hpp"
 #include "Red/Entity.hpp"
 #include "Red/Mesh.hpp"
 
@@ -491,6 +492,11 @@ bool App::EntityState::SelectDynamicAppearance(DynamicAppearanceName& aSelector,
 
     if (match)
     {
+        Core::Log::Info("[TruthLogger][GarmentState] SelectDynamicAppearance entity={} selector='{}' base='{}' variant='{}' candidates={} matched='{}' weight={} parts={}",
+                        m_name.c_str(), aSelector.value.ToString(), aSelector.name.ToString(),
+                        aSelector.variant.ToString(), numCandidates, match->name.ToString(), maxWeight,
+                        match->partsValues.Size());
+
         if (match->name != aSelector.value)
         {
             auto definition = Red::MakeHandle<Red::AppearanceDefinition>();
@@ -523,6 +529,10 @@ bool App::EntityState::SelectDynamicAppearance(DynamicAppearanceName& aSelector,
 
     if (aSelector.isDynamic && numCandidates > 0)
     {
+        Core::Log::Info("[TruthLogger][GarmentState] SelectDynamicAppearance NO_MATCH (empty fallback!) entity={} selector='{}' base='{}' variant='{}' candidates={}",
+                        m_name.c_str(), aSelector.value.ToString(), aSelector.name.ToString(),
+                        aSelector.variant.ToString(), numCandidates);
+
         aDefinition = Red::MakeHandle<Red::AppearanceDefinition>();
         aDefinition->name = aSelector.value;
 
@@ -558,6 +568,10 @@ void App::EntityState::ToggleConditionalComponents(Red::DynArray<Red::Handle<Red
             continue;
 
         component->isEnabled = m_dynamicAppearance->MatchReference(componentRef, m_entity, resourceState->GetActiveAppearance());
+
+        Core::Log::Info("[TruthLogger][GarmentState] ToggleConditional entity={} comp='{}' base='{}' activeApp='{}' matched={}",
+                        m_name.c_str(), component->name.ToString(), componentRef.name.ToString(),
+                        resourceState->GetActiveAppearance().value.ToString(), component->isEnabled);
 
         if (component->isEnabled)
         {
@@ -632,18 +646,21 @@ bool App::EntityState::ApplyDynamicAppearance(const Red::Handle<Red::IComponent>
     if (componentWrapper.IsMeshComponent())
     {
         const auto originalResource = GetOriginalResource(componentWrapper);
+        const auto currentResource = componentWrapper.GetResourcePath();
         const auto finalResource = m_dynamicAppearance->ResolvePath(m_entity, aVariant, originalResource);
 
-        if (finalResource != originalResource && finalResource != componentWrapper.GetResourcePath())
+        if (finalResource != originalResource && finalResource != currentResource)
         {
             componentWrapper.SetResourcePath(finalResource);
             updated = true;
         }
 
+        Red::CName originalAppearance;
+        Red::CName finalAppearance;
         if (aSetAppearance)
         {
-            const auto originalAppearance = GetOriginalAppearance(componentWrapper);
-            const auto finalAppearance = m_dynamicAppearance->ResolveName(m_entity, aVariant, originalAppearance);
+            originalAppearance = GetOriginalAppearance(componentWrapper);
+            finalAppearance = m_dynamicAppearance->ResolveName(m_entity, aVariant, originalAppearance);
 
             if (finalAppearance != originalAppearance && finalAppearance != componentWrapper.GetAppearanceName())
             {
@@ -651,6 +668,22 @@ bool App::EntityState::ApplyDynamicAppearance(const Red::Handle<Red::IComponent>
                 updated = true;
             }
         }
+
+        const bool finalExists = Red::ResourceDepot::Get()->ResourceExists(finalResource);
+        Core::Log::Info("[TruthLogger][ApplyDynamicAppearance] entity={} comp={} setApp={} updated={} origMesh={} (0x{:X}) curMesh={} (0x{:X}) finalMesh={} (0x{:X}) exists={} origApp={} finalApp={}",
+                        GetName(),
+                        aComponent->name.ToString(),
+                        aSetAppearance,
+                        updated,
+                        m_dynamicAppearance->GetPathStringOrHash(originalResource),
+                        originalResource.hash,
+                        m_dynamicAppearance->GetPathStringOrHash(currentResource),
+                        currentResource.hash,
+                        m_dynamicAppearance->GetPathStringOrHash(finalResource),
+                        finalResource.hash,
+                        finalExists,
+                        originalAppearance.ToString(),
+                        finalAppearance.ToString());
     }
 
     return updated;
