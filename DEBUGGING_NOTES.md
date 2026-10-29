@@ -27,6 +27,7 @@ Every potential point of failure was tested in-game with exact runtime logs:
 | **Test B** | TruthLogger with `AXL_SUPPRESS_BUILTIN_EXTENSIONS=1` (`1417f40`) | ❌ Intercepted (no-op) | ❌ Inactive (`nullptr`) | ❌ Inactive (`nullptr`) | **Invisible** | Confirmed: Suppressing built-in extension service reliably reproduces the bug. |
 | **Test C1** | Selective Slot Bisection: Mode `GARMENT` | ✅ Active | ❌ **Nulled out** (`0`) | ✅ Active | **Visible** | **GarmentExtension is completely innocent.** Garments render properly even when embedded GarmentExtension is eliminated. |
 | **Test C2** | Selective Slot Bisection: Mode `MESH` | ✅ Active | ✅ Active | ❌ **Nulled out** (`0`) | **Invisible** | **MeshExtension is 100% the sole root cause.** Nulling only the Mesh slot reproduces the exact invisibility. |
+| **Test D (Sol. 1)**| Bridge VTable Hook with `AXL_SUPPRESS_BUILTIN_EXTENSIONS=1` | ❌ Intercepted (no-op) | ❌ Inactive (`nullptr`) | ❌ Inactive (`nullptr`) | **Invisible** | **Bridge VTable hook never called.** `Bootstrap` at RVA `0x2224D70` initializes the global Bridge instance at RVA `0x4334610`; suppressing `Bootstrap` leaves the Bridge uninitialized across 70+ engine subsystems. |
 
 ---
 
@@ -158,12 +159,32 @@ During investigation, three earlier hypotheses were rigorously disproven:
 
 ## 6. Implementation & Resolution Strategy
 
-### 6.1 Clean Upstream Integration (Recommended)
+### 6.1 Clean Upstream Integration (Definitive Resolution)
 To permanently resolve the regression without conflict:
 1. **Allow REDengine's Built-in ExtensionService to Bootstrap:**
-   In [ExtensionService.cpp](src/App/Extensions/ExtensionService.cpp), keep `AXL_SUPPRESS_BUILTIN_EXTENSIONS = 0`.
+   In [ExtensionService.cpp](src/App/Extensions/ExtensionService.cpp), set `AXL_SUPPRESS_BUILTIN_EXTENSIONS = 0`.
 2. **Built-in & External Coexistence:**
-   REDengine's internal `MeshExtension` will service internal bridge call sites (`vfunc[+0x68]` and `vfunc[+0x70]`), ensuring all dynamic material expansion occurs natively in engine threads.
-   External ArchiveXL hooks continue providing extended functionality (e.g. world streaming sectors, attachment fixes, custom resource links).
+   In REDengine 2.5, CDPR natively incorporated the Dynamic Mesh appearance resolution pipeline directly into `Cyberpunk2077.exe`:
+   - Slot 2 extension name: `"DynamicMesh"` (string literal at RVA `0x36EE650`).
+   - Slot 2 VTable at RVA `0x36EE1F8` points to `OnFindAppearance` (`0x232A8A0`) and `OnLoadMaterials` (`0x232AC30`).
+   Allowing REDengine's native `DynamicMesh` extension to run restores full material and appearance resolution for modded items without breaking engine subsystems.
+   External ArchiveXL hooks continue providing extended functionality (e.g. world streaming sectors, attachment fixes, custom resource links, localization, factory indexing).
 3. **Safe Bisection Toggle:**
    The bisection logic introduced in [ExtensionService.cpp](src/App/Extensions/ExtensionService.cpp) is maintained with default `AXL_BISECT_DEFAULT "NONE"`, allowing future diagnostic inspection via the `AXL_BISECT` environment variable without requiring recompilation.
+
+---
+
+### 6.2 Post-Mortem on Solution 1 (Bridge VTable Hook)
+- **Concept:** Keep `Raw::ExtensionService::Bootstrap` suppressed (`AXL_SUPPRESS_BUILTIN_EXTENSIONS = 1`) and overwrite the Bridge VTable (`vfunc[+0x68]`, `vfunc[+0x70]`, `vfunc[+0x78]`) at RVA `0x36EBA40` to route calls into external `App::MeshExtension`.
+- **Outcome:** **Failed (In-game items invisible, 0 Bridge calls logged).**
+- **Disassembly Analysis:**
+  1. In `Cyberpunk2077.exe`, `Raw::ExtensionService::Bootstrap` (entry at RVA `0x2224D70`) executes `call 0x2301410`, which initializes the Bridge and writes the Bridge pointer to global instance `0x4334610`.
+  2. Over 70 engine subsystems call `0x2224D70` (`GetExtensionBridge()`).
+  3. When `Bootstrap` is no-op intercepted, `0x4334610` remains an uninitialized NULL structure. Consequently, engine callers never execute indirect virtual dispatch on the Bridge, and no calls ever reached the hooked VTable.
+- **Git History Insight:**
+  In psiberx's repository:
+  - Commit `205accc`: *Support patch 2.5* (introduced Bootstrap suppression).
+  - Commit `e93ba2f`: *Re-enable built-in extension service* (removed Bootstrap suppression — everything worked).
+  - Commit `1417f40` (v1.28.2): *Disable built-in extension service* (re-introduced Bootstrap suppression — caused the Patch 2.5 Dynamic Mesh regression).
+- **Conclusion:**
+  Suppressing `Raw::ExtensionService::Bootstrap` is inherently destructive to REDengine 2.5's subsystem architecture. Keeping `AXL_SUPPRESS_BUILTIN_EXTENSIONS = 0` is the single architecturally correct resolution.
